@@ -289,3 +289,99 @@ function check_thunking_is_appropriate(x̄s)
         end
     end
 end
+
+struct Rand{N}
+    T::Type
+    size::NTuple{N,Int}
+end
+
+Rand(T::Type, s::Int...) = T in [Real, Complex] ? Rand{length(s)}(T,s) : error("only Real/Complex")
+Rand(T::Type, s::Tuple) = Rand(T, s...)
+Rand(s::Int...) = Rand(Complex, s)
+Rand(s::Tuple) = Rand(s...)
+
+"""
+    rrule_test(f, Rand(3,3), etc...; fkwargs=NamedTuple(), kwargs...)
+
+This runs gradient tests a function like `f(rand(3,3), etc...; fkwargs...)`,
+but in addition to testing with `Array`, makes some other types (such as views, and `Diagonal`).
+The list of types used depends on `ndims`; testing with vector, square matrix, and a
+3-array will cover all possibilities.
+
+`Rand()` makes a scalar. They take a type, defaulting to `Complex`;
+specify for example `Rand(Real,3)` to test only real numbers.
+
+Fixed arguments (i.e. non-`Rand`) are assumed not to be differentiable.
+"""
+function rrule_test(f, args::Union{AbstractArray, Number, Rand}...; kwargs...)
+    lists = map(make_rrule_list, args)
+    todo = maximum(length, lists)
+    done = 0
+    for argset in zip(map(Iterators.cycle, lists)...)
+        done >= todo && break
+        y = f(argset...)
+        rrule_test(f, y, argset...; kwargs...) # TODO generate ybar like y here
+        done += 1
+    end
+end
+
+make_rrule_list(x::Number) = Any[(x, nothing)] # TODO this is the wrong type
+
+function make_rrule_list(x::Rand{0})
+    if x.T == Complex
+        return Any[(randn(), randn()), (rand(1:99), randn()), (randn(ComplexF64), randn(ComplexF64))]
+    else
+        return Any[(randn(), randn()), (rand(1:99), randn())]
+    end
+end
+
+function make_rrule_list(x::Rand{1})
+    s = x.size
+    list = Any[
+        (randn(s), randn(s)),
+        (1:s[1], randn(s)),  # integer, immutable
+        (view(randn(s), shuffle(1:first(s))), randn(s)),  # non-StridedArray
+    ]
+    if x.T == Complex
+        append!(list, Any[
+            (randn(ComplexF64, s), randn(ComplexF64, s)),
+        ])
+    end
+    return list
+end
+
+function make_rrule_list(x::Rand{2})
+    s = x.size
+    if s[1] != s[2]
+        return invoke(make_rrule_list, Tuple{Rand}, x)
+    end
+    # Here handle only square matrices:
+    list = Any[
+        (randn(s), randn(s)),
+        (Diagonal(randn(s[1])), randn(s)),  # structural zeros
+        (UpperTriangular(randn(s)), randn(s)),
+        (Bidiagonal(rand(s[1]), rand(s[1]-1), :U), randn(s)), # no simple parent
+        (Symmetric(randn(s)), randn(s)),   # structural constraint
+    ]
+    if x.T == Complex
+        append!(list, Any[
+            (randn(ComplexF64, s), randn(ComplexF64, s)),
+        ])
+    end
+    return list
+end
+
+function make_rrule_list(x::Rand) # catches all higher dims, and non-square matrices
+    s = x.size
+    list = Any[
+        (randn!(reinterpret(Float64, zeros(Int, s))), randn(s)),  # weird StridedArray
+        (PermutedDimsArray(randn(s), Tuple(1:length(s))), randn(s)),  # mutable non-StridedArray
+        (reshape(1.0:prod(s), s), randn(s)),  # immutable Float64
+    ]
+    if x.T == Complex
+        append!(list, Any[
+            (randn(ComplexF64, s), randn(ComplexF64, s)),
+        ])
+    end
+    return list
+end
